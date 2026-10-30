@@ -1,12 +1,14 @@
 // =============================================================
-//  전투 시험판 — 색깔 상자 버전
+//  전투 시험판 — 색깔 상자 버전 (쿼터뷰)
 //  워프레임 4기가 알아서 싸우고, 플레이어(로터스)는 3번 개입합니다.
 // =============================================================
 
 const W = 1280, H = 720;
-const GROUND_Y = 600;              // 발이 닿는 높이
-const LANES = [588, 604, 620, 636]; // 워프레임별 서 있는 줄(겹치지 않게)
-const LEASH = 150;                 // 스쿼드 중심에서 이만큼 이상 떨어지지 않음 (근접은 +80)
+const WORLD_W = 3400;              // 구역 전체 가로 길이 (카메라가 따라감)
+const FLOOR_TOP = 200, FLOOR_BOTTOM = 640; // 걸어다닐 수 있는 바닥 범위
+const ADVANCE = 550;               // 웨이브마다 전진하는 거리
+const LEASH = 170;                 // 스쿼드 지점에서 이만큼 이상 떨어지지 않음 (근접은 +80)
+const SLOTS = [{ x: 40, y: -60 }, { x: -50, y: -20 }, { x: -40, y: 60 }, { x: 50, y: 30 }]; // 대형 위치
 const FONT = '"Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
 
 // 그림 파일이 있으면 그림, 없으면 색깔 상자
@@ -49,13 +51,14 @@ class TitleScene extends Phaser.Scene {
   }
 }
 
-// ------------------------------------------------------------- 전투
+// ------------------------------------------------------------- 전투 (쿼터뷰)
+// 땅은 위에서 비스듬히 내려다본 평면입니다. 유닛은 (x, y) 위를 움직이고,
+// z는 점프 높이입니다. 스쿼드는 웨이브를 막을 때마다 오른쪽으로 전진하고 카메라가 따라갑니다.
 class BattleScene extends Phaser.Scene {
   constructor() { super('Battle'); }
 
   create() {
     this.timeMul = 1;
-    this.anchorX = 200;
     this.units = [];
     this.spawnQueue = [];
     this.spawnTimer = 0;
@@ -65,49 +68,55 @@ class BattleScene extends Phaser.Scene {
     this.focusTarget = null;
     this.ended = false;
     this.elapsed = 0;
+    this.objective = { x: 400, y: (FLOOR_TOP + FLOOR_BOTTOM) / 2 }; // 스쿼드가 지킬 지점
+    this.anchor = { ...this.objective };
 
-    this.drawBackground();
+    this.drawWorld();
+    this.cameras.main.setBounds(0, 0, WORLD_W, H);
 
-    this.frames = WARFRAMES.map((d, i) => this.addUnit('tenno', d, 120 + i * 50, LANES[i]));
+    this.frames = WARFRAMES.map((d, i) => this.addUnit('tenno', d, 260 + SLOTS[i].x, this.objective.y + SLOTS[i].y));
+    this.cameras.main.scrollX = 0;
+
+    const before = this.children.list.length;
     this.buildHud();
-    this.say('로터스', '텐노, 그리너가 몰려온다. 이 구역을 지켜라.');
+    this.children.list.slice(before).forEach(o => o.setScrollFactor(0)); // 화면 위 정보는 카메라를 따라가지 않음
+    this.say('로터스', '텐노, 그리너 시설 안으로 진입한다. 앞으로 나아가라.');
   }
 
-  // 배경은 오른쪽→왼쪽으로 계속 흘러감 (달리는 느낌). 먼 층은 느리게, 바닥은 빠르게.
-  drawBackground() {
-    this.scrollLayers = [];
+  // ---------------- 바닥과 벽
+  drawWorld() {
     if (this.textures.exists('img_background')) {
       const src = this.textures.get('img_background').getSourceImage();
-      const bg = this.add.tileSprite(0, 0, W, H, 'img_background').setOrigin(0).setDepth(-10);
+      const bg = this.add.tileSprite(0, 0, WORLD_W, H, 'img_background').setOrigin(0).setDepth(-10);
       bg.setTileScale(H / src.height);
-      this.scrollLayers.push({ obj: bg, speed: 90 / (H / src.height) });
       return;
     }
-    const g = this.add.graphics().setDepth(-12);
-    g.fillGradientStyle(0x1a2233, 0x1a2233, 0x2e3a4f, 0x2e3a4f, 1);
-    g.fillRect(0, 0, W, GROUND_Y - 30);
-    if (!this.textures.exists('bg_far')) {
+    if (!this.textures.exists('floor_tile')) {
       const t = this.make.graphics({}, false);
-      for (let i = 0; i < 8; i++) t.fillStyle(0x222b3f, 1).fillRect(i * 160 + 10, 180 + (i * 37 % 90), 120, 400);
-      t.generateTexture('bg_far', W, GROUND_Y - 30);
+      // 비스듬히 본 바닥 타일(마름모 무늬)
+      t.fillStyle(0x3a3f47, 1).fillRect(0, 0, 128, 64);
+      t.lineStyle(2, 0x4a515b, 1);
+      t.beginPath(); t.moveTo(0, 32); t.lineTo(64, 0); t.lineTo(128, 32); t.lineTo(64, 64); t.closePath(); t.strokePath();
+      t.fillStyle(0x434952, 1).fillRect(60, 28, 8, 8);
+      t.generateTexture('floor_tile', 128, 64);
       t.clear();
-      for (let i = 0; i < 6; i++) {
-        const h = 200 + (i * 53 % 120);
-        t.fillStyle(0x2a3550, 1).fillRect(i * 215 + 30, GROUND_Y - 30 - h, 110, h);
-        t.fillStyle(0xff9f43, 0.5).fillRect(i * 215 + 50, GROUND_Y - 10 - h, 16, 6);
-      }
-      t.generateTexture('bg_mid', W, GROUND_Y - 30);
-      t.clear();
-      t.fillStyle(0x3b3f45, 1).fillRect(0, 0, 256, H - GROUND_Y + 30);
-      t.fillStyle(0x555b63, 1).fillRect(0, 0, 256, 3);
-      t.fillStyle(0x464b52, 1).fillRect(20, 40, 90, 8).fillRect(150, 80, 70, 6);
-      t.generateTexture('bg_ground', 256, H - GROUND_Y + 30);
+      // 뒤쪽 벽
+      t.fillStyle(0x232a38, 1).fillRect(0, 0, 256, FLOOR_TOP);
+      t.fillStyle(0x2d3647, 1).fillRect(0, FLOOR_TOP - 40, 256, 40);
+      t.fillStyle(0x1b2130, 1).fillRect(20, 40, 60, FLOOR_TOP - 90).fillRect(150, 60, 80, FLOOR_TOP - 110);
+      t.fillStyle(0xff9f43, 0.6).fillRect(40, FLOOR_TOP - 30, 24, 6).fillRect(180, FLOOR_TOP - 30, 24, 6);
+      t.generateTexture('wall_tile', 256, FLOOR_TOP);
       t.destroy();
     }
-    const far = this.add.tileSprite(0, 0, W, GROUND_Y - 30, 'bg_far').setOrigin(0).setDepth(-11);
-    const mid = this.add.tileSprite(0, 0, W, GROUND_Y - 30, 'bg_mid').setOrigin(0).setDepth(-10);
-    const ground = this.add.tileSprite(0, GROUND_Y - 30, W, H - GROUND_Y + 30, 'bg_ground').setOrigin(0).setDepth(-10);
-    this.scrollLayers.push({ obj: far, speed: 25 }, { obj: mid, speed: 60 }, { obj: ground, speed: 150 });
+    this.add.tileSprite(0, 0, WORLD_W, FLOOR_TOP, 'wall_tile').setOrigin(0).setDepth(-10);
+    this.add.tileSprite(0, FLOOR_TOP, WORLD_W, H - FLOOR_TOP, 'floor_tile').setOrigin(0).setDepth(-10);
+    // 엄폐물(장식) — 그리너 상자와 기둥
+    for (let x = 500; x < WORLD_W; x += 380 + (x * 7 % 160)) {
+      const y = FLOOR_TOP + 60 + (x * 13 % (FLOOR_BOTTOM - FLOOR_TOP - 120));
+      this.add.ellipse(x, y, 70, 22, 0x000000, 0.3).setDepth(y - 1);
+      this.add.rectangle(x, y - 22, 60, 44, 0x5b4a36).setStrokeStyle(3, 0x2b2218).setDepth(y);
+      this.add.rectangle(x, y - 44, 60, 14, 0x6e5a42).setDepth(y);
+    }
   }
 
   // ---------------- 유닛 만들기
@@ -115,17 +124,18 @@ class BattleScene extends Phaser.Scene {
     const isT = team === 'tenno';
     const w = def.w || 40, h = def.h || 72;
     const u = {
-      team, def, x, y, w, h,
+      team, def, x, y, z: 0, w, h,
       hpMax: def.hp, hp: def.hp,
       shieldMax: def.shield || 0, shield: def.shield || 0,
       armor: def.armor, energy: isT ? 50 : 0,
       facing: isT ? 1 : -1, atkTimer: Math.random() * 0.5,
-      cd: [0, 0], stun: 0, sinceHit: 99, z: 0, jump: null, jumpCd: 1 + Math.random(), trailT: 0,
+      cd: [0, 0], stun: 0, sinceHit: 99, jump: null, jumpCd: 0, escapeCd: 0, trailT: 0,
       buff: { speed: 0, roar: 0, focus: 0 }, ironSkin: 0,
       downed: false, dead: false, bleed: 0, reviveProg: 0,
       rangeFactor: isT ? 0.85 : 0.55 + Math.random() * 0.35,
       stats: { dmg: 0, kills: 0, downs: 0, revives: 0, casts: 0 },
     };
+    u.shadow = this.add.ellipse(x, y, w * 1.3, w * 0.45, 0x000000, 0.35);
     u.view = this.add.container(x, y);
     u.body = makeBody(this, def, w, h);
     u.view.add(u.body);
@@ -147,14 +157,13 @@ class BattleScene extends Phaser.Scene {
   }
 
   alive(team) { return this.units.filter(u => u.team === team && !u.dead && !u.downed); }
-
+  dist(a, b) { return Math.hypot(a.x - b.x, (a.y - b.y) * 1.6); } // 세로는 비스듬히 본 만큼 멀게 계산
   nearest(u, list) {
     let best = null, bd = 1e9;
-    for (const o of list) { const d = Math.abs(o.x - u.x); if (d < bd) { bd = d; best = o; } }
+    for (const o of list) { const d = this.dist(u, o); if (d < bd) { bd = d; best = o; } }
     return best;
   }
-
-  within(x, r, list) { return list.filter(o => Math.abs(o.x - x) <= r); }
+  within(p, r, list) { return list.filter(o => this.dist(p, o) <= r); }
 
   // ---------------- 피해 처리
   hurt(target, amount, src, opts = {}) {
@@ -178,14 +187,11 @@ class BattleScene extends Phaser.Scene {
     if (target.hp <= 0) target.team === 'tenno' ? this.down(target) : this.kill(target, src);
   }
 
-  heal(u, amt) { u.hp = Math.min(u.hpMax, u.hp + amt); }
-
   down(u) {
     u.hp = 0; u.downed = true; u.jump = null; u.z = 0; u.bleed = RULES.bleedout; u.stats.downs++;
     u.body.setAngle(-90 * u.facing); u.body.setAlpha(0.7);
     this.say('오르디스', `${u.def.name}가 쓰러졌습니다! 누가 좀 일으켜 주세요!`);
-    const up = this.alive('tenno');
-    if (up.length === 0) this.endMission('fail');
+    if (this.alive('tenno').length === 0) this.endMission('fail');
   }
 
   revive(u, by) {
@@ -198,28 +204,35 @@ class BattleScene extends Phaser.Scene {
     u.dead = true;
     if (src) src.stats.kills++;
     if (this.focusTarget === u) this.focusTarget = null;
-    this.tweens.add({ targets: u.view, alpha: 0, y: u.y + 10, duration: 300, onComplete: () => u.view.destroy() });
+    u.shadow.destroy();
+    this.tweens.add({ targets: u.view, alpha: 0, duration: 300, onComplete: () => u.view.destroy() });
   }
 
   // ---------------- 연출
   tracer(a, b, color, width = 2) {
-    const ln = this.add.line(0, 0, a.x + a.facing * a.w / 2, a.y - a.z - a.h * 0.6, b.x, b.y - b.z - b.h * 0.5, color).setOrigin(0).setLineWidth(width).setDepth(900);
+    const ln = this.add.line(0, 0, a.x + a.facing * a.w / 2, a.y - a.z - a.h * 0.6, b.x, b.y - b.z - b.h * 0.5, color).setOrigin(0).setLineWidth(width).setDepth(5000);
     this.tweens.add({ targets: ln, alpha: 0, duration: 120, onComplete: () => ln.destroy() });
   }
 
   ring(x, y, r, color) {
-    const c = this.add.circle(x, y - 36, 10, color, 0.25).setStrokeStyle(3, color).setDepth(900);
+    const c = this.add.circle(x, y, 10, color, 0.2).setStrokeStyle(3, color).setScale(1, 0.6).setDepth(y - 2);
     this.tweens.add({ targets: c, radius: r, alpha: 0, duration: 450, onComplete: () => c.destroy() });
   }
 
   floatText(u, txt, color, big) {
-    const t = this.add.text(u.x + (Math.random() - 0.5) * 20, u.y - u.h - 20, txt, { fontFamily: FONT, fontSize: big ? 20 : 13, color, fontStyle: 'bold', stroke: '#000', strokeThickness: 3 }).setOrigin(0.5).setDepth(950);
+    const t = this.add.text(u.x + (Math.random() - 0.5) * 20, u.y - u.z - u.h - 20, txt, { fontFamily: FONT, fontSize: big ? 20 : 13, color, fontStyle: 'bold', stroke: '#000', strokeThickness: 3 }).setOrigin(0.5).setDepth(5100);
     this.tweens.add({ targets: t, y: t.y - 30, alpha: 0, duration: 700, onComplete: () => t.destroy() });
   }
 
   castText(u, name) {
-    const t = this.add.text(u.x, u.y - u.h - 46, name, { fontFamily: FONT, fontSize: 16, color: '#7fd1ff', fontStyle: 'bold', stroke: '#000', strokeThickness: 4 }).setOrigin(0.5).setDepth(960);
+    const t = this.add.text(u.x, u.y - u.z - u.h - 46, name, { fontFamily: FONT, fontSize: 16, color: '#7fd1ff', fontStyle: 'bold', stroke: '#000', strokeThickness: 4 }).setOrigin(0.5).setDepth(5200);
     this.tweens.add({ targets: t, y: t.y - 20, alpha: 0, delay: 500, duration: 500, onComplete: () => t.destroy() });
+  }
+
+  swing(u, target) {
+    const ang = Phaser.Math.RadToDeg(Math.atan2(target.y - u.y, target.x - u.x));
+    const s = this.add.arc(u.x, u.y - u.z - u.h * 0.5, 40, ang - 60, ang + 60, false).setStrokeStyle(4, 0xbfe9ff).setDepth(5000);
+    this.tweens.add({ targets: s, alpha: 0, duration: 150, onComplete: () => s.destroy() });
   }
 
   say(who, line) {
@@ -227,19 +240,81 @@ class BattleScene extends Phaser.Scene {
     this.sayTimer = 4;
   }
 
+  // ---------------- 움직임
+  moveToward(u, tx, ty, mul, dt) {
+    const dx = tx - u.x, dy = ty - u.y, d = Math.hypot(dx, dy);
+    if (d < 1) return;
+    const step = Math.min(d, u.def.speed * mul * dt);
+    u.x += dx / d * step; u.y += dy / d * step;
+    if (Math.abs(dx) > 2) u.facing = Math.sign(dx);
+    this.clampFloor(u);
+  }
+
+  clampFloor(u) {
+    u.x = Phaser.Math.Clamp(u.x, 20, WORLD_W - 20);
+    u.y = Phaser.Math.Clamp(u.y, FLOOR_TOP + 20, FLOOR_BOTTOM);
+  }
+
+  // 같은 편끼리 겹치지 않게 살짝 밀어냄
+  separate(u, list, dt) {
+    for (const o of list) {
+      if (o === u) continue;
+      const dx = u.x - o.x, dy = u.y - o.y, d = Math.hypot(dx, dy);
+      if (d > 0 && d < 34) { u.x += dx / d * 60 * dt; u.y += dy / d * 60 * dt; }
+    }
+  }
+
+  // ---------------- 불릿 점프
+  tryJump(u, tx, ty) {
+    if (u.jumpCd > 0 || u.stun > 0) return false;
+    const dx = tx - u.x, dy = ty - u.y, d = Math.hypot(dx, dy);
+    if (d < 60) return false;
+    const len = Math.min(d, 340);
+    const toX = Phaser.Math.Clamp(u.x + dx / d * len, 20, WORLD_W - 20);
+    const toY = Phaser.Math.Clamp(u.y + dy / d * len, FLOOR_TOP + 20, FLOOR_BOTTOM);
+    u.facing = Math.sign(dx) || u.facing;
+    u.jump = { t: 0, dur: 0.4 + len / 900, fromX: u.x, fromY: u.y, toX, toY, peak: 50 + len * 0.3 };
+    u.jumpCd = 1.5;
+    u.body.setAngle(u.facing * 18);
+    return true;
+  }
+
+  updateJump(u, dt, enemies) {
+    const j = u.jump;
+    j.t = Math.min(1, j.t + dt / j.dur);
+    u.x = j.fromX + (j.toX - j.fromX) * j.t;
+    u.y = j.fromY + (j.toY - j.fromY) * j.t;
+    u.z = Math.sin(Math.PI * j.t) * j.peak;
+    u.trailT -= dt;
+    if (u.trailT <= 0) {
+      u.trailT = 0.04;
+      const g = this.add.rectangle(u.x, u.y - u.z - u.h / 2, u.w, u.h, u.def.color, 0.35).setAngle(u.facing * 18).setDepth(u.y - 1);
+      this.tweens.add({ targets: g, alpha: 0, duration: 220, onComplete: () => g.destroy() });
+    }
+    if (j.t >= 1) {
+      u.jump = null; u.z = 0;
+      u.body.setAngle(0);
+      const d = this.add.ellipse(u.x, u.y, 20, 8, 0xcfd8e3, 0.6).setDepth(u.y - 1);
+      this.tweens.add({ targets: d, scaleX: 3, scaleY: 3, alpha: 0, duration: 250, onComplete: () => d.destroy() });
+      if (u.def.weapon.range < 100) { // 근접 프레임은 착지하며 내려찍기
+        const hit = this.within(u, 90, enemies);
+        if (hit.length) { this.ring(u.x, u.y, 90, 0xbfe9ff); hit.forEach(e => this.hurt(e, 45, u)); }
+      }
+    }
+  }
+
   // ---------------- 능력
   tryAbilities(u, enemies) {
     const allies = this.alive('tenno');
     const has = (i) => u.cd[i] <= 0 && u.energy >= u.def.abilities[i].cost;
-    const near = (r) => this.within(u.x, r, enemies);
+    const near = (r) => this.within(u, r, enemies);
     switch (u.def.id) {
-      case 'excalibur':
+      case 'excalibur': {
         if (has(1) && near(300).length >= 4) return this.cast(u, 1);
-        if (has(0)) {
-          const t = this.nearest(u, enemies);
-          if (Math.abs(t.x - u.x) > 90 && Math.abs(t.x - u.x) < 320 && Math.abs(t.x - this.anchorX) < this.leashOf(u) + 120) return this.cast(u, 0);
-        }
+        const t = this.nearest(u, enemies);
+        if (has(0) && this.dist(u, t) > 90 && this.dist(u, t) < 320 && this.dist(this.anchor, t) < this.leashOf(u) + 120) return this.cast(u, 0);
         break;
+      }
       case 'mag':
         if (has(1) && allies.some(a => a.shield < a.shieldMax * 0.4)) return this.cast(u, 1);
         if (has(0) && near(450).length >= 3) return this.cast(u, 0);
@@ -258,23 +333,29 @@ class BattleScene extends Phaser.Scene {
 
   cast(u, i, free = false) {
     const ab = u.def.abilities[i];
-    if (!free) { u.energy -= ab.cost; }
+    if (!free) u.energy -= ab.cost;
     u.cd[i] = ab.cooldown;
     u.stats.casts++;
     this.castText(u, ab.name);
     const enemies = this.alive('grineer');
     const allies = this.alive('tenno');
-    const near = (r) => this.within(u.x, r, enemies);
+    const near = (r) => this.within(u, r, enemies);
     switch (ab.id) {
       case 'slashDash': {
         const t = this.nearest(u, enemies); if (!t) break;
-        const dir = Math.sign(t.x - u.x) || u.facing;
-        const reach = this.leashOf(u) + 120;
-        const from = u.x, to = Phaser.Math.Clamp(t.x + dir * 40, Math.max(30, this.anchorX - reach), Math.min(W - 30, this.anchorX + reach));
-        enemies.filter(e => (e.x - from) * dir >= -10 && (e.x - to) * dir <= 10).forEach(e => this.hurt(e, 160, u, { big: true }));
-        const ghost = this.add.rectangle(Math.min(from, to), u.y - u.h / 2, Math.abs(to - from), 10, 0x7fd1ff, 0.7).setOrigin(0, 0.5).setDepth(900);
-        this.tweens.add({ targets: ghost, alpha: 0, duration: 300, onComplete: () => ghost.destroy() });
-        u.x = to; u.facing = dir;
+        const ang = Math.atan2(t.y - u.y, t.x - u.x);
+        const len = Math.min(this.dist(u, t) + 40, 360);
+        const from = { x: u.x, y: u.y }, to = { x: u.x + Math.cos(ang) * len, y: u.y + Math.sin(ang) * len };
+        // 지나간 선 근처의 적을 모두 벰
+        enemies.forEach(e => {
+          const l2 = (to.x - from.x) ** 2 + (to.y - from.y) ** 2;
+          const k = Phaser.Math.Clamp(((e.x - from.x) * (to.x - from.x) + (e.y - from.y) * (to.y - from.y)) / l2, 0, 1);
+          if (Math.hypot(e.x - (from.x + k * (to.x - from.x)), e.y - (from.y + k * (to.y - from.y))) < 45) this.hurt(e, 160, u, { big: true });
+        });
+        const ln = this.add.line(0, 0, from.x, from.y - u.h / 2, to.x, to.y - u.h / 2, 0x7fd1ff).setOrigin(0).setLineWidth(10).setAlpha(0.7).setDepth(5000);
+        this.tweens.add({ targets: ln, alpha: 0, duration: 300, onComplete: () => ln.destroy() });
+        u.x = to.x; u.y = to.y; this.clampFloor(u);
+        u.facing = Math.sign(to.x - from.x) || u.facing;
         break;
       }
       case 'radialBlind':
@@ -284,8 +365,8 @@ class BattleScene extends Phaser.Scene {
       case 'pull':
         this.ring(u.x, u.y, 450, 0xe066c8);
         near(450).forEach(e => {
-          const side = Math.sign(e.x - u.x) || 1;
-          e.x = u.x + side * (50 + Math.random() * 40);
+          const a = Math.atan2(e.y - u.y, e.x - u.x), r = 50 + Math.random() * 40;
+          e.x = u.x + Math.cos(a) * r; e.y = u.y + Math.sin(a) * r * 0.6; this.clampFloor(e);
           e.stun = Math.max(e.stun, 1.5);
           this.hurt(e, 90, u, { big: true });
         });
@@ -296,10 +377,10 @@ class BattleScene extends Phaser.Scene {
         near(400).forEach(e => this.hurt(e, 60, u, { big: true }));
         break;
       case 'shock': {
-        let t = this.nearest(u, enemies); if (!t) break;
+        const t = this.nearest(u, enemies); if (!t) break;
         const hit = [t]; let last = t;
         for (let k = 0; k < 3; k++) {
-          const next = this.nearest(last, enemies.filter(e => !hit.includes(e) && Math.abs(e.x - last.x) < 220));
+          const next = this.nearest(last, enemies.filter(e => !hit.includes(e) && this.dist(e, last) < 220));
           if (!next) break; hit.push(next); last = next;
         }
         let prev = u;
@@ -321,6 +402,15 @@ class BattleScene extends Phaser.Scene {
     return true;
   }
 
+  leashOf(u) { return u.def.weapon.range < 100 ? LEASH + 80 : LEASH; }
+
+  // 스쿼드가 모일 곳: 쓰러진 동료가 있으면 그 자리, 아니면 지킬 지점
+  squadAnchor() {
+    const downed = this.frames.filter(f => f.downed);
+    if (downed.length) { const d = downed.reduce((a, b) => (b.bleed < a.bleed ? b : a)); return { x: d.x, y: d.y }; }
+    return this.objective;
+  }
+
   // ---------------- 워프레임 생각하기
   thinkTenno(u, dt) {
     if (u.downed) {
@@ -338,26 +428,25 @@ class BattleScene extends Phaser.Scene {
     const enemies = this.alive('grineer');
     const speedMul = u.buff.speed > 0 ? 1.5 : 1;
     u.jumpCd -= dt * speedMul;
+    u.escapeCd -= dt;
     if (u.jump) this.updateJump(u, dt * speedMul, enemies);
+    else this.separate(u, this.alive('tenno'), dt);
 
-    // 1) 쓰러진 동료가 있으면 가장 가까운 사람이 부활하러 감
-    const downed = this.units.filter(o => o.team === 'tenno' && o.downed);
-    for (const d of downed) {
-      const helper = this.nearest(d, this.alive('tenno'));
-      if (helper === u) {
-        const dx = d.x - u.x;
-        if (u.jump) return;
-        if (Math.abs(dx) > 30) { this.moveToward(u, d.x, speedMul, dt); return; }
-        d.reviveProg += dt;
-        if (d.reviveProg >= RULES.reviveTime) this.revive(d, u);
-        return;
-      }
+    // 1) 쓰러진 동료가 있으면 가장 가까운 사람이 걸어가서 부활
+    for (const d of this.frames.filter(o => o.downed)) {
+      if (this.nearest(d, this.alive('tenno')) !== u) continue;
+      if (u.jump) return;
+      if (this.dist(u, d) > 30) { this.moveToward(u, d.x, d.y, speedMul, dt); return; }
+      d.reviveProg += dt;
+      if (d.reviveProg >= RULES.reviveTime) this.revive(d, u);
+      return;
     }
 
+    const slot = SLOTS[WARFRAMES.indexOf(u.def)];
     if (enemies.length === 0) {
-      const home = 160 + WARFRAMES.indexOf(u.def) * 50;
+      // 전투가 없으면 다음 지점으로 전진 (멀면 20% 확률로 불릿 점프)
       if (u.jump) return;
-      if (Math.abs(home - u.x) > 10) this.moveToward(u, home, 1, dt); else u.facing = 1;
+      this.approach(u, this.anchor.x + slot.x, this.anchor.y + slot.y, speedMul, dt);
       return;
     }
 
@@ -366,38 +455,33 @@ class BattleScene extends Phaser.Scene {
 
     // 3) 사격/근접
     const target = (this.focusTarget && !this.focusTarget.dead && u.buff.focus > 0) ? this.focusTarget : this.nearest(u, enemies);
-    const dist = Math.abs(target.x - u.x);
+    const dist = this.dist(u, target);
     const range = u.def.weapon.range;
     u.facing = Math.sign(target.x - u.x) || u.facing;
-    // 혼자 튀어나가지 않게: 스쿼드 중심 근처에서만 움직임
-    const L = this.leashOf(u);
-    let want = dist > range * u.rangeFactor ? target.x : u.x;
-    want = Phaser.Math.Clamp(want, this.anchorX - L, this.anchorX + L);
-    u.escapeCd = (u.escapeCd || 0) - dt;
+
     if (!u.jump) {
-      const close = this.nearest(u, enemies);
-      if (u.hp < u.hpMax * 0.3 && u.escapeCd <= 0 && Math.abs(close.x - u.x) < 130) {
+      if (u.hp < u.hpMax * 0.3 && u.escapeCd <= 0 && dist < 130) {
         // 체력이 바닥인데 적이 붙어 있으면 반대쪽으로 불릿 점프해서 도망
         u.escapeCd = 5; u.jumpCd = 0;
-        this.tryJump(u, u.x - (Math.sign(close.x - u.x) || 1) * 320, true);
-      } else if (Math.abs(want - u.x) > 70) {
-        // 적에게 다가갈 때 20% 확률로 불릿 점프 (다가가기 시작할 때 한 번만 정함)
-        if (u.approachJump === undefined) u.approachJump = Math.random() < RULES.approachJumpChance;
-        if (!(u.approachJump && this.tryJump(u, want, true))) this.moveToward(u, want, speedMul, dt);
-        else u.approachJump = false;
+        const a = Math.atan2(u.y - target.y, u.x - target.x);
+        this.tryJump(u, u.x + Math.cos(a) * 320, u.y + Math.sin(a) * 320);
       } else {
-        u.approachJump = undefined;
-        if (Math.abs(want - u.x) > 8) this.moveToward(u, want, speedMul, dt);
+        // 사거리 밖이면 적 쪽으로, 단 스쿼드 지점에서 너무 멀어지지 않게
+        let want = dist > range * u.rangeFactor ? { x: target.x, y: target.y } : { x: u.x, y: u.y };
+        const L = this.leashOf(u), ax = this.anchor.x + slot.x * 0.5, ay = this.anchor.y + slot.y * 0.5;
+        const off = Math.hypot(want.x - ax, want.y - ay);
+        if (off > L) want = { x: ax + (want.x - ax) / off * L, y: ay + (want.y - ay) / off * L };
+        this.approach(u, want.x, want.y, speedMul, dt);
       }
     }
+
     if (dist <= range) {
       u.atkTimer -= dt * speedMul;
       if (u.atkTimer <= 0) {
         u.atkTimer = u.def.weapon.fireRate;
         if (range < 100) {
-          // 근접: 앞쪽 적 여러 명을 벰
-          this.within(u.x + u.facing * 35, 45, enemies).forEach(e => this.hurt(e, u.def.weapon.damage, u));
-          this.swing(u);
+          this.within(target, 50, enemies).forEach(e => this.hurt(e, u.def.weapon.damage, u)); // 근접: 주변 적 여러 명을 벰
+          this.swing(u, target);
         } else {
           this.tracer(u, target, u.def.color);
           this.hurt(target, u.def.weapon.damage * (0.9 + Math.random() * 0.2), u);
@@ -406,57 +490,17 @@ class BattleScene extends Phaser.Scene {
     }
   }
 
-  // ---------------- 불릿 점프
-  tryJump(u, tx, far) {
-    if (u.jumpCd > 0 || u.stun > 0) return false;
-    const dist = Phaser.Math.Clamp(Math.abs(tx - u.x), 0, far ? 320 : 200);
-    if (dist < 40) return false;
-    const dir = Math.sign(tx - u.x);
-    const toX = Phaser.Math.Clamp(u.x + dir * dist, 30, W - 30);
-    u.jump = { t: 0, dur: 0.4 + dist / 900, fromX: u.x, toX, peak: 50 + dist * 0.35, dir };
-    u.jumpCd = 1.2 + Math.random() * 1.6;
-    if (!u.downed) u.body.setAngle(dir * 18);
-    return true;
-  }
-
-  updateJump(u, dt, enemies) {
-    const j = u.jump;
-    j.t = Math.min(1, j.t + dt / j.dur);
-    u.x = j.fromX + (j.toX - j.fromX) * j.t;
-    u.z = Math.sin(Math.PI * j.t) * j.peak;
-    u.trailT -= dt;
-    if (u.trailT <= 0) {
-      u.trailT = 0.04;
-      const g = this.add.rectangle(u.x, u.y - u.z - u.h / 2, u.w, u.h, u.def.color, 0.35).setAngle(j.dir * 18).setDepth(u.y - 1);
-      this.tweens.add({ targets: g, alpha: 0, duration: 220, onComplete: () => g.destroy() });
+  // 목표 지점으로 이동. 멀리 가야 할 때는 처음 한 번 20% 확률로 불릿 점프
+  approach(u, tx, ty, mul, dt) {
+    const d = Math.hypot(tx - u.x, ty - u.y);
+    if (d > 70) {
+      if (u.approachJump === undefined) u.approachJump = Math.random() < RULES.approachJumpChance;
+      if (u.approachJump && this.tryJump(u, tx, ty)) { u.approachJump = false; return; }
+      this.moveToward(u, tx, ty, mul, dt);
+    } else {
+      u.approachJump = undefined;
+      if (d > 8) this.moveToward(u, tx, ty, mul, dt);
     }
-    if (j.t >= 1) {
-      u.jump = null; u.z = 0;
-      if (!u.downed) u.body.setAngle(0);
-      this.dust(u.x, u.y);
-      // 근접 프레임은 착지하며 내려찍기
-      if (u.def.weapon.range < 100) {
-        const hit = this.within(u.x, 90, enemies);
-        if (hit.length) { this.ring(u.x, u.y + 30, 90, 0xbfe9ff); hit.forEach(e => this.hurt(e, 45, u)); }
-      }
-    }
-  }
-
-  dust(x, y) {
-    const d = this.add.ellipse(x, y, 20, 6, 0xcfd8e3, 0.6).setDepth(y - 1);
-    this.tweens.add({ targets: d, scaleX: 3, alpha: 0, duration: 250, onComplete: () => d.destroy() });
-  }
-
-  swing(u) {
-    const s = this.add.arc(u.x + u.facing * 30, u.y - u.z - u.h * 0.55, 34, u.facing > 0 ? -60 : 120, u.facing > 0 ? 60 : 240, false).setStrokeStyle(4, 0xbfe9ff).setDepth(900);
-    this.tweens.add({ targets: s, alpha: 0, duration: 150, onComplete: () => s.destroy() });
-  }
-
-  moveToward(u, tx, mul, dt) {
-    const dir = Math.sign(tx - u.x);
-    u.facing = dir || u.facing;
-    u.x += dir * (u.def.speed) * mul * dt;
-    u.x = Phaser.Math.Clamp(u.x, 30, W - 30);
   }
 
   // ---------------- 그리너 생각하기
@@ -464,22 +508,22 @@ class BattleScene extends Phaser.Scene {
     if (u.stun > 0) return;
     const foes = this.alive('tenno');
     if (foes.length === 0) return;
+    this.separate(u, this.alive('grineer'), dt);
     const target = this.nearest(u, foes);
-    const dist = Math.abs(target.x - u.x);
+    const dist = this.dist(u, target);
     const range = u.def.weapon.range;
     u.facing = Math.sign(target.x - u.x) || u.facing;
-    const onScreen = u.x > 20 && u.x < W - 20;
-    if (dist > range * u.rangeFactor || !onScreen) {
-      u.x += u.facing * u.def.speed * dt;
-    }
+    const cam = this.cameras.main;
+    const onScreen = u.x > cam.scrollX + 20 && u.x < cam.scrollX + W - 20;
+    if (dist > range * u.rangeFactor || !onScreen) this.moveToward(u, target.x, target.y, 1, dt);
     if (dist <= range && onScreen) {
       u.atkTimer -= dt;
       if (u.atkTimer <= 0) {
         u.atkTimer = u.def.weapon.fireRate * (0.9 + Math.random() * 0.3);
         if (range < 100) {
-          this.swing(u);
+          this.swing(u, target);
           if (target.z < 40) this.hurt(target, u.def.weapon.damage, u);
-        } else if (Math.random() < (target.z > 10 ? 0.25 : 0.65)) {
+        } else if (Math.random() < (target.z > 10 ? 0.25 : 0.65)) { // 공중에 뜬 워프레임은 잘 안 맞음
           this.tracer(u, target, 0xff9f43, 1);
           this.hurt(target, u.def.weapon.damage, u);
         }
@@ -491,18 +535,23 @@ class BattleScene extends Phaser.Scene {
   nextWave() {
     this.waveIndex++;
     if (this.waveIndex >= WAVES.length) return this.endMission('win');
-    const wave = WAVES[this.waveIndex];
-    wave.forEach(g => { for (let i = 0; i < g.count; i++) this.spawnQueue.push({ type: g.type, side: g.side || 'right' }); });
+    if (this.waveIndex > 0) {
+      // 다음 구역으로 전진
+      this.objective = { x: Math.min(WORLD_W - 500, this.objective.x + ADVANCE), y: FLOOR_TOP + 120 + Math.random() * (FLOOR_BOTTOM - FLOOR_TOP - 200) };
+    }
+    WAVES[this.waveIndex].forEach(g => { for (let i = 0; i < g.count; i++) this.spawnQueue.push({ type: g.type, side: g.side || 'right' }); });
     Phaser.Utils.Array.Shuffle(this.spawnQueue);
+    this.spawnTimer = this.waveIndex > 0 ? 2.5 : 0; // 전진할 시간
     this.waveText.setText(`웨이브 ${this.waveIndex + 1} / ${WAVES.length}`);
-    const lines = ['그리너 병력 접근 중.', '적 증원이다. 대열을 유지해라.', '뒤쪽에서도 온다! 조심해라.', '헤비 거너 확인. 방어력이 높다.', '마지막 물결이다, 텐노.'];
+    const lines = ['그리너 병력 접근 중.', '앞으로 나아가라. 적 증원이다.', '뒤쪽에서도 온다! 조심해라.', '헤비 거너 확인. 방어력이 높다.', '마지막 물결이다, 텐노.'];
     this.say('로터스', lines[this.waveIndex] || '적이 온다.');
   }
 
   spawnOne(s) {
     const def = { ...GRINEER[s.type], id: s.type };
-    const x = s.side === 'left' ? -30 : W + 30;
-    this.addUnit('grineer', def, x, 584 + Math.random() * 56);
+    const x = s.side === 'left' ? this.objective.x - W / 2 - 80 : this.objective.x + W / 2 + 80;
+    const y = FLOOR_TOP + 30 + Math.random() * (FLOOR_BOTTOM - FLOOR_TOP - 30);
+    this.addUnit('grineer', def, Phaser.Math.Clamp(x, 10, WORLD_W - 10), y);
   }
 
   // ---------------- 로터스 개입
@@ -522,7 +571,7 @@ class BattleScene extends Phaser.Scene {
         if (f.downed) this.revive(f, null);
         f.hp = f.hpMax; f.shield = f.shieldMax; f.energy = Math.min(f.def.energyMax, f.energy + 50);
       });
-      this.ring(W / 2, GROUND_Y, 700, 0x4cd964);
+      this.ring(this.anchor.x, this.anchor.y, 600, 0x4cd964);
       this.say('로터스', '보급품을 투하했다. 쓰러진 자도 일으켜라.');
     } else if (cmd === 'ult') {
       this.alive('tenno').forEach(f => { f.energy = f.def.energyMax; f.cd = [0, 0]; this.cast(f, 1, true); });
@@ -536,39 +585,39 @@ class BattleScene extends Phaser.Scene {
   buildHud() {
     this.hud = this.frames.map((f, i) => {
       const x = 16 + i * 230, y = 12;
-      this.add.rectangle(x, y, 220, 78, 0x000000, 0.55).setOrigin(0).setStrokeStyle(2, f.def.color).setDepth(1000);
-      const name = this.add.text(x + 8, y + 4, f.def.name, { fontFamily: FONT, fontSize: 16, color: '#fff', fontStyle: 'bold' }).setDepth(1001);
-      const state = this.add.text(x + 212, y + 6, '', { fontFamily: FONT, fontSize: 12, color: '#ffd23f' }).setOrigin(1, 0).setDepth(1001);
+      this.add.rectangle(x, y, 220, 78, 0x000000, 0.55).setOrigin(0).setStrokeStyle(2, f.def.color).setDepth(9000);
+      const name = this.add.text(x + 8, y + 4, f.def.name, { fontFamily: FONT, fontSize: 16, color: '#fff', fontStyle: 'bold' }).setDepth(9001);
+      const state = this.add.text(x + 212, y + 6, '', { fontFamily: FONT, fontSize: 12, color: '#ffd23f' }).setOrigin(1, 0).setDepth(9001);
       const bar = (yy, col) => {
-        this.add.rectangle(x + 8, y + yy, 204, 10, 0x222222).setOrigin(0).setDepth(1001);
-        return this.add.rectangle(x + 8, y + yy, 204, 10, col).setOrigin(0).setDepth(1002);
+        this.add.rectangle(x + 8, y + yy, 204, 10, 0x222222).setOrigin(0).setDepth(9001);
+        return this.add.rectangle(x + 8, y + yy, 204, 10, col).setOrigin(0).setDepth(9002);
       };
       return { name, state, sh: bar(28, 0x5ac8fa), hp: bar(42, 0x4cd964), en: bar(56, 0x9b59b6) };
     });
-    this.waveText = this.add.text(W - 16, 14, '준비 중', { fontFamily: FONT, fontSize: 22, color: '#fff', fontStyle: 'bold' }).setOrigin(1, 0).setDepth(1000);
+    this.waveText = this.add.text(W - 16, 14, '준비 중', { fontFamily: FONT, fontSize: 22, color: '#fff', fontStyle: 'bold' }).setOrigin(1, 0).setDepth(9000);
     this.speedBtn = this.add.text(W - 16, 48, '속도 x1', { fontFamily: FONT, fontSize: 16, color: '#0b0f1a', backgroundColor: '#cfd8e3', padding: { x: 8, y: 4 } })
-      .setOrigin(1, 0).setDepth(1000).setInteractive({ useHandCursor: true });
+      .setOrigin(1, 0).setDepth(9000).setInteractive({ useHandCursor: true });
     this.speedBtn.on('pointerdown', () => {
       this.timeMul = this.timeMul >= 3 ? 1 : this.timeMul + 1;
       this.tweens.timeScale = this.timeMul;
       this.speedBtn.setText('속도 x' + this.timeMul);
     });
 
-    this.sayBox = this.add.text(W / 2, 110, '', { fontFamily: FONT, fontSize: 18, color: '#e8f1ff', backgroundColor: '#0b0f1acc', padding: { x: 12, y: 6 } }).setOrigin(0.5, 0).setDepth(1000);
+    this.sayBox = this.add.text(W / 2, 100, '', { fontFamily: FONT, fontSize: 18, color: '#e8f1ff', backgroundColor: '#0b0f1acc', padding: { x: 12, y: 6 } }).setOrigin(0.5, 0).setDepth(9000);
 
-    // 로터스 버튼
     const cmds = [['focus', '집중 공격'], ['supply', '긴급 보급'], ['ult', '궁극기 발동'], ['retreat', '후퇴']];
-    this.add.text(16, H - 52, '로터스 개입', { fontFamily: FONT, fontSize: 14, color: '#8fb3d9' }).setDepth(1000);
-    this.pointsText = this.add.text(16, H - 32, '', { fontFamily: FONT, fontSize: 18, color: '#7fd1ff', fontStyle: 'bold' }).setDepth(1000);
+    this.add.rectangle(0, H - 64, W, 64, 0x000000, 0.5).setOrigin(0).setDepth(8999);
+    this.add.text(16, H - 52, '로터스 개입', { fontFamily: FONT, fontSize: 14, color: '#8fb3d9' }).setDepth(9000);
+    this.pointsText = this.add.text(16, H - 32, '', { fontFamily: FONT, fontSize: 18, color: '#7fd1ff', fontStyle: 'bold' }).setDepth(9000);
     this.lotusBtns = cmds.map(([id, label], i) => {
-      const b = this.add.text(160 + i * 170, H - 44, `${i + 1}. ${label}`, { fontFamily: FONT, fontSize: 18, color: '#0b0f1a', backgroundColor: id === 'retreat' ? '#e0a0a0' : '#7fd1ff', padding: { x: 12, y: 8 } })
-        .setOrigin(0, 0.5).setDepth(1000).setInteractive({ useHandCursor: true });
+      const b = this.add.text(160 + i * 170, H - 32, `${i + 1}. ${label}`, { fontFamily: FONT, fontSize: 18, color: '#0b0f1a', backgroundColor: id === 'retreat' ? '#e0a0a0' : '#7fd1ff', padding: { x: 12, y: 8 } })
+        .setOrigin(0, 0.5).setDepth(9000).setInteractive({ useHandCursor: true });
       b.on('pointerdown', () => this.lotus(id));
       this.input.keyboard.on('keydown-' + ['ONE', 'TWO', 'THREE', 'FOUR'][i], () => this.lotus(id));
       b.cmd = id;
       return b;
     });
-    this.add.text(W - 16, H - 20, '비공식 팬게임 · Digital Extremes와 무관', { fontFamily: FONT, fontSize: 12, color: '#889' }).setOrigin(1, 0.5).setDepth(1000);
+    this.add.text(W - 16, H - 20, '비공식 팬게임 · Digital Extremes와 무관', { fontFamily: FONT, fontSize: 12, color: '#889' }).setOrigin(1, 0.5).setDepth(9000);
     this.refreshLotusButtons();
   }
 
@@ -594,29 +643,14 @@ class BattleScene extends Phaser.Scene {
     });
   }
 
-  // 스쿼드가 모일 위치: 쓰러진 동료가 있으면 그 자리로 다 같이, 아니면 서로의 가운데
-  squadAnchor() {
-    const downed = this.frames.filter(f => f.downed);
-    if (downed.length) return downed.reduce((a, b) => (b.bleed < a.bleed ? b : a)).x;
-    const up = this.alive('tenno');
-    if (!up.length) return W / 2;
-    const avg = up.reduce((s, f) => s + f.x, 0) / up.length;
-    return Phaser.Math.Clamp(avg, 200, 640);
-  }
-
-  leashOf(u) { return u.def.weapon.range < 100 ? LEASH + 80 : LEASH; }
-
   // ---------------- 매 프레임
   update(_t, delta) {
     if (this.ended) return;
     const dt = Math.min(delta / 1000, 0.05) * this.timeMul;
     this.elapsed += dt;
 
-    this.scrollLayers.forEach(l => { l.obj.tilePositionX += l.speed * dt; });
-
     if (this.sayTimer > 0) { this.sayTimer -= dt; if (this.sayTimer <= 0) this.tweens.add({ targets: this.sayBox, alpha: 0, duration: 400 }); }
 
-    // 웨이브 진행
     if (this.spawnQueue.length) {
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) { this.spawnOne(this.spawnQueue.shift()); this.spawnTimer = 0.3; }
@@ -625,10 +659,9 @@ class BattleScene extends Phaser.Scene {
       if (this.waveDelay <= 0) { this.waveDelay = 3; this.nextWave(); if (this.ended) return; }
     }
 
-    this.anchorX = this.squadAnchor();
+    this.anchor = this.squadAnchor();
     for (const u of this.units) {
       if (u.dead && u.team === 'grineer') continue;
-      // 타이머
       u.stun = Math.max(0, u.stun - dt);
       u.cd = u.cd.map(c => Math.max(0, c - dt));
       for (const k in u.buff) u.buff[k] = Math.max(0, u.buff[k] - dt);
@@ -640,7 +673,8 @@ class BattleScene extends Phaser.Scene {
       if (u.team === 'tenno') { if (!u.dead) this.thinkTenno(u, dt); } else this.thinkGrineer(u, dt);
       if (this.ended) return;
 
-      // 그리기
+      // 그리기: 그림자는 땅에, 몸은 점프 높이만큼 위로. 아래쪽에 있을수록 앞에 그림
+      u.shadow.setPosition(u.x, u.y).setDepth(u.y - 1).setScale(1 - Math.min(u.z, 150) / 300);
       u.view.setPosition(u.x, u.y - u.z).setDepth(u.y);
       if (!u.downed && !u.dead) u.body.setScale(Math.abs(u.body.scaleX) * u.facing, u.body.scaleY);
       u.hpBar.width = u.w * Math.max(0, u.hp / u.hpMax);
@@ -649,6 +683,14 @@ class BattleScene extends Phaser.Scene {
       u.stunFx.setVisible(u.stun > 0 && !u.dead);
     }
     this.units = this.units.filter(u => !(u.dead && u.team === 'grineer'));
+
+    // 카메라는 스쿼드 가운데를 부드럽게 따라감
+    const up = this.frames.filter(f => !f.dead);
+    if (up.length) {
+      const cx = up.reduce((s, f) => s + f.x, 0) / up.length;
+      const cam = this.cameras.main;
+      cam.scrollX += (cx - W / 2 - cam.scrollX) * Math.min(1, dt * 2);
+    }
     this.updateHud();
   }
 
