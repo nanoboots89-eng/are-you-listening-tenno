@@ -96,7 +96,7 @@ class BattleScene extends Phaser.Scene {
       shieldMax: def.shield || 0, shield: def.shield || 0,
       armor: def.armor, energy: isT ? 50 : 0,
       facing: isT ? 1 : -1, atkTimer: Math.random() * 0.5,
-      cd: [0, 0], stun: 0, sinceHit: 99,
+      cd: [0, 0], stun: 0, sinceHit: 99, z: 0, jump: null, jumpCd: 1 + Math.random(), trailT: 0,
       buff: { speed: 0, roar: 0, focus: 0 }, ironSkin: 0,
       downed: false, dead: false, bleed: 0, reviveProg: 0,
       rangeFactor: isT ? 0.85 : 0.55 + Math.random() * 0.35,
@@ -157,7 +157,7 @@ class BattleScene extends Phaser.Scene {
   heal(u, amt) { u.hp = Math.min(u.hpMax, u.hp + amt); }
 
   down(u) {
-    u.hp = 0; u.downed = true; u.bleed = RULES.bleedout; u.stats.downs++;
+    u.hp = 0; u.downed = true; u.jump = null; u.z = 0; u.bleed = RULES.bleedout; u.stats.downs++;
     u.body.setAngle(-90 * u.facing); u.body.setAlpha(0.7);
     this.say('오르디스', `${u.def.name}가 쓰러졌습니다! 누가 좀 일으켜 주세요!`);
     const up = this.alive('tenno');
@@ -179,7 +179,7 @@ class BattleScene extends Phaser.Scene {
 
   // ---------------- 연출
   tracer(a, b, color, width = 2) {
-    const ln = this.add.line(0, 0, a.x + a.facing * a.w / 2, a.y - a.h * 0.6, b.x, b.y - b.h * 0.5, color).setOrigin(0).setLineWidth(width).setDepth(900);
+    const ln = this.add.line(0, 0, a.x + a.facing * a.w / 2, a.y - a.z - a.h * 0.6, b.x, b.y - b.z - b.h * 0.5, color).setOrigin(0).setLineWidth(width).setDepth(900);
     this.tweens.add({ targets: ln, alpha: 0, duration: 120, onComplete: () => ln.destroy() });
   }
 
@@ -309,10 +309,12 @@ class BattleScene extends Phaser.Scene {
       }
       return;
     }
-    if (u.stun > 0) return;
+    if (u.stun > 0 && !u.jump) return;
 
     const enemies = this.alive('grineer');
     const speedMul = u.buff.speed > 0 ? 1.5 : 1;
+    u.jumpCd -= dt * speedMul;
+    if (u.jump) this.updateJump(u, dt * speedMul, enemies);
 
     // 1) 쓰러진 동료가 있으면 가장 가까운 사람이 부활하러 감
     const downed = this.units.filter(o => o.team === 'tenno' && o.downed);
@@ -320,7 +322,8 @@ class BattleScene extends Phaser.Scene {
       const helper = this.nearest(d, this.alive('tenno'));
       if (helper === u) {
         const dx = d.x - u.x;
-        if (Math.abs(dx) > 30) { this.moveToward(u, d.x, speedMul, dt); return; }
+        if (u.jump) return;
+        if (Math.abs(dx) > 30) { if (!this.tryJump(u, d.x, true)) this.moveToward(u, d.x, speedMul, dt); return; }
         d.reviveProg += dt;
         if (d.reviveProg >= RULES.reviveTime) this.revive(d, u);
         return;
@@ -329,12 +332,13 @@ class BattleScene extends Phaser.Scene {
 
     if (enemies.length === 0) {
       const home = 160 + WARFRAMES.indexOf(u.def) * 50;
+      if (u.jump) return;
       if (Math.abs(home - u.x) > 10) this.moveToward(u, home, 1, dt); else u.facing = 1;
       return;
     }
 
     // 2) 능력
-    if (this.tryAbilities(u, enemies)) return;
+    if (!u.jump && this.tryAbilities(u, enemies)) return;
 
     // 3) 사격/근접
     const target = (this.focusTarget && !this.focusTarget.dead && u.buff.focus > 0) ? this.focusTarget : this.nearest(u, enemies);
@@ -345,7 +349,17 @@ class BattleScene extends Phaser.Scene {
     const L = this.leashOf(u);
     let want = dist > range * u.rangeFactor ? target.x : u.x;
     want = Phaser.Math.Clamp(want, this.anchorX - L, this.anchorX + L);
-    if (Math.abs(want - u.x) > 8) this.moveToward(u, want, speedMul, dt);
+    if (!u.jump) {
+      if (Math.abs(want - u.x) > 70) {
+        if (!this.tryJump(u, want, true)) this.moveToward(u, want, speedMul, dt);
+      } else if (Math.abs(want - u.x) > 8) {
+        this.moveToward(u, want, speedMul, dt);
+      } else if (dist <= range) {
+        // 싸우는 중에도 가만히 있지 않고 짧게 점프하며 자리를 바꿈 (공중에선 잘 안 맞음)
+        const hop = Phaser.Math.Clamp(u.x + (Math.random() - 0.5) * 300, this.anchorX - L, this.anchorX + L);
+        if (Math.abs(hop - u.x) > 60) this.tryJump(u, hop, false);
+      }
+    }
     if (dist <= range) {
       u.atkTimer -= dt * speedMul;
       if (u.atkTimer <= 0) {
@@ -362,8 +376,49 @@ class BattleScene extends Phaser.Scene {
     }
   }
 
+  // ---------------- 불릿 점프
+  tryJump(u, tx, far) {
+    if (u.jumpCd > 0 || u.stun > 0) return false;
+    const dist = Phaser.Math.Clamp(Math.abs(tx - u.x), 0, far ? 320 : 200);
+    if (dist < 40) return false;
+    const dir = Math.sign(tx - u.x);
+    const toX = Phaser.Math.Clamp(u.x + dir * dist, 30, W - 30);
+    u.jump = { t: 0, dur: 0.4 + dist / 900, fromX: u.x, toX, peak: 50 + dist * 0.35, dir };
+    u.jumpCd = 1.2 + Math.random() * 1.6;
+    if (!u.downed) u.body.setAngle(dir * 18);
+    return true;
+  }
+
+  updateJump(u, dt, enemies) {
+    const j = u.jump;
+    j.t = Math.min(1, j.t + dt / j.dur);
+    u.x = j.fromX + (j.toX - j.fromX) * j.t;
+    u.z = Math.sin(Math.PI * j.t) * j.peak;
+    u.trailT -= dt;
+    if (u.trailT <= 0) {
+      u.trailT = 0.04;
+      const g = this.add.rectangle(u.x, u.y - u.z - u.h / 2, u.w, u.h, u.def.color, 0.35).setAngle(j.dir * 18).setDepth(u.y - 1);
+      this.tweens.add({ targets: g, alpha: 0, duration: 220, onComplete: () => g.destroy() });
+    }
+    if (j.t >= 1) {
+      u.jump = null; u.z = 0;
+      if (!u.downed) u.body.setAngle(0);
+      this.dust(u.x, u.y);
+      // 근접 프레임은 착지하며 내려찍기
+      if (u.def.weapon.range < 100) {
+        const hit = this.within(u.x, 90, enemies);
+        if (hit.length) { this.ring(u.x, u.y + 30, 90, 0xbfe9ff); hit.forEach(e => this.hurt(e, 45, u)); }
+      }
+    }
+  }
+
+  dust(x, y) {
+    const d = this.add.ellipse(x, y, 20, 6, 0xcfd8e3, 0.6).setDepth(y - 1);
+    this.tweens.add({ targets: d, scaleX: 3, alpha: 0, duration: 250, onComplete: () => d.destroy() });
+  }
+
   swing(u) {
-    const s = this.add.arc(u.x + u.facing * 30, u.y - u.h * 0.55, 34, u.facing > 0 ? -60 : 120, u.facing > 0 ? 60 : 240, false).setStrokeStyle(4, 0xbfe9ff).setDepth(900);
+    const s = this.add.arc(u.x + u.facing * 30, u.y - u.z - u.h * 0.55, 34, u.facing > 0 ? -60 : 120, u.facing > 0 ? 60 : 240, false).setStrokeStyle(4, 0xbfe9ff).setDepth(900);
     this.tweens.add({ targets: s, alpha: 0, duration: 150, onComplete: () => s.destroy() });
   }
 
@@ -393,8 +448,8 @@ class BattleScene extends Phaser.Scene {
         u.atkTimer = u.def.weapon.fireRate * (0.9 + Math.random() * 0.3);
         if (range < 100) {
           this.swing(u);
-          this.hurt(target, u.def.weapon.damage, u);
-        } else if (Math.random() < 0.65) {
+          if (target.z < 40) this.hurt(target, u.def.weapon.damage, u);
+        } else if (Math.random() < (target.z > 10 ? 0.25 : 0.65)) {
           this.tracer(u, target, 0xff9f43, 1);
           this.hurt(target, u.def.weapon.damage, u);
         }
@@ -554,7 +609,7 @@ class BattleScene extends Phaser.Scene {
       if (this.ended) return;
 
       // 그리기
-      u.view.setPosition(u.x, u.y).setDepth(u.y);
+      u.view.setPosition(u.x, u.y - u.z).setDepth(u.y);
       if (!u.downed && !u.dead) u.body.setScale(Math.abs(u.body.scaleX) * u.facing, u.body.scaleY);
       u.hpBar.width = u.w * Math.max(0, u.hp / u.hpMax);
       if (u.shBar) u.shBar.width = u.w * (u.shield / u.shieldMax);
