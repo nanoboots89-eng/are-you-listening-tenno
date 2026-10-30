@@ -6,6 +6,7 @@
 const W = 1280, H = 720;
 const GROUND_Y = 600;              // 발이 닿는 높이
 const LANES = [588, 604, 620, 636]; // 워프레임별 서 있는 줄(겹치지 않게)
+const LEASH = 150;                 // 스쿼드 중심에서 이만큼 이상 떨어지지 않음 (근접은 +80)
 const FONT = '"Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
 
 // 그림 파일이 있으면 그림, 없으면 색깔 상자
@@ -54,6 +55,7 @@ class BattleScene extends Phaser.Scene {
 
   create() {
     this.timeMul = 1;
+    this.anchorX = 200;
     this.units = [];
     this.spawnQueue = [];
     this.spawnTimer = 0;
@@ -209,7 +211,10 @@ class BattleScene extends Phaser.Scene {
     switch (u.def.id) {
       case 'excalibur':
         if (has(1) && near(300).length >= 4) return this.cast(u, 1);
-        if (has(0) && near(320).length >= 1 && Math.abs(this.nearest(u, enemies).x - u.x) > 90) return this.cast(u, 0);
+        if (has(0)) {
+          const t = this.nearest(u, enemies);
+          if (Math.abs(t.x - u.x) > 90 && Math.abs(t.x - u.x) < 320 && Math.abs(t.x - this.anchorX) < this.leashOf(u) + 120) return this.cast(u, 0);
+        }
         break;
       case 'mag':
         if (has(1) && allies.some(a => a.shield < a.shieldMax * 0.4)) return this.cast(u, 1);
@@ -240,7 +245,8 @@ class BattleScene extends Phaser.Scene {
       case 'slashDash': {
         const t = this.nearest(u, enemies); if (!t) break;
         const dir = Math.sign(t.x - u.x) || u.facing;
-        const from = u.x, to = Phaser.Math.Clamp(t.x + dir * 40, 30, W - 30);
+        const reach = this.leashOf(u) + 120;
+        const from = u.x, to = Phaser.Math.Clamp(t.x + dir * 40, Math.max(30, this.anchorX - reach), Math.min(W - 30, this.anchorX + reach));
         enemies.filter(e => (e.x - from) * dir >= -10 && (e.x - to) * dir <= 10).forEach(e => this.hurt(e, 160, u, { big: true }));
         const ghost = this.add.rectangle(Math.min(from, to), u.y - u.h / 2, Math.abs(to - from), 10, 0x7fd1ff, 0.7).setOrigin(0, 0.5).setDepth(900);
         this.tweens.add({ targets: ghost, alpha: 0, duration: 300, onComplete: () => ghost.destroy() });
@@ -335,11 +341,11 @@ class BattleScene extends Phaser.Scene {
     const dist = Math.abs(target.x - u.x);
     const range = u.def.weapon.range;
     u.facing = Math.sign(target.x - u.x) || u.facing;
-    // 방어선(화면 가운데쯤)보다 앞으로는 나가지 않음 — 근접은 예외
-    const holdMax = range < 100 ? 860 : 700;
-    if (dist > range * u.rangeFactor && !(target.x > u.x && u.x >= holdMax)) {
-      this.moveToward(u, target.x, speedMul, dt);
-    }
+    // 혼자 튀어나가지 않게: 스쿼드 중심 근처에서만 움직임
+    const L = this.leashOf(u);
+    let want = dist > range * u.rangeFactor ? target.x : u.x;
+    want = Phaser.Math.Clamp(want, this.anchorX - L, this.anchorX + L);
+    if (Math.abs(want - u.x) > 8) this.moveToward(u, want, speedMul, dt);
     if (dist <= range) {
       u.atkTimer -= dt * speedMul;
       if (u.atkTimer <= 0) {
@@ -503,6 +509,18 @@ class BattleScene extends Phaser.Scene {
     });
   }
 
+  // 스쿼드가 모일 위치: 쓰러진 동료가 있으면 그 자리로 다 같이, 아니면 서로의 가운데
+  squadAnchor() {
+    const downed = this.frames.filter(f => f.downed);
+    if (downed.length) return downed.reduce((a, b) => (b.bleed < a.bleed ? b : a)).x;
+    const up = this.alive('tenno');
+    if (!up.length) return W / 2;
+    const avg = up.reduce((s, f) => s + f.x, 0) / up.length;
+    return Phaser.Math.Clamp(avg, 200, 640);
+  }
+
+  leashOf(u) { return u.def.weapon.range < 100 ? LEASH + 80 : LEASH; }
+
   // ---------------- 매 프레임
   update(_t, delta) {
     if (this.ended) return;
@@ -520,6 +538,7 @@ class BattleScene extends Phaser.Scene {
       if (this.waveDelay <= 0) { this.waveDelay = 3; this.nextWave(); if (this.ended) return; }
     }
 
+    this.anchorX = this.squadAnchor();
     for (const u of this.units) {
       if (u.dead && u.team === 'grineer') continue;
       // 타이머
