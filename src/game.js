@@ -73,17 +73,41 @@ class BattleScene extends Phaser.Scene {
     this.say('로터스', '텐노, 그리너가 몰려온다. 이 구역을 지켜라.');
   }
 
+  // 배경은 오른쪽→왼쪽으로 계속 흘러감 (달리는 느낌). 먼 층은 느리게, 바닥은 빠르게.
   drawBackground() {
+    this.scrollLayers = [];
     if (this.textures.exists('img_background')) {
-      this.add.image(0, 0, 'img_background').setOrigin(0).setDisplaySize(W, H).setDepth(-10);
+      const src = this.textures.get('img_background').getSourceImage();
+      const bg = this.add.tileSprite(0, 0, W, H, 'img_background').setOrigin(0).setDepth(-10);
+      bg.setTileScale(H / src.height);
+      this.scrollLayers.push({ obj: bg, speed: 90 / (H / src.height) });
       return;
     }
-    const g = this.add.graphics().setDepth(-10);
+    const g = this.add.graphics().setDepth(-12);
     g.fillGradientStyle(0x1a2233, 0x1a2233, 0x2e3a4f, 0x2e3a4f, 1);
     g.fillRect(0, 0, W, GROUND_Y - 30);
-    for (let i = 0; i < 9; i++) g.fillStyle(0x253047, 1).fillRect(i * 150 + 20, 250 + (i % 3) * 40, 90, GROUND_Y - 280 - (i % 3) * 40);
-    g.fillStyle(0x3b3f45, 1).fillRect(0, GROUND_Y - 30, W, H - GROUND_Y + 30);
-    g.lineStyle(2, 0x555b63).lineBetween(0, GROUND_Y - 30, W, GROUND_Y - 30);
+    if (!this.textures.exists('bg_far')) {
+      const t = this.make.graphics({}, false);
+      for (let i = 0; i < 8; i++) t.fillStyle(0x222b3f, 1).fillRect(i * 160 + 10, 180 + (i * 37 % 90), 120, 400);
+      t.generateTexture('bg_far', W, GROUND_Y - 30);
+      t.clear();
+      for (let i = 0; i < 6; i++) {
+        const h = 200 + (i * 53 % 120);
+        t.fillStyle(0x2a3550, 1).fillRect(i * 215 + 30, GROUND_Y - 30 - h, 110, h);
+        t.fillStyle(0xff9f43, 0.5).fillRect(i * 215 + 50, GROUND_Y - 10 - h, 16, 6);
+      }
+      t.generateTexture('bg_mid', W, GROUND_Y - 30);
+      t.clear();
+      t.fillStyle(0x3b3f45, 1).fillRect(0, 0, 256, H - GROUND_Y + 30);
+      t.fillStyle(0x555b63, 1).fillRect(0, 0, 256, 3);
+      t.fillStyle(0x464b52, 1).fillRect(20, 40, 90, 8).fillRect(150, 80, 70, 6);
+      t.generateTexture('bg_ground', 256, H - GROUND_Y + 30);
+      t.destroy();
+    }
+    const far = this.add.tileSprite(0, 0, W, GROUND_Y - 30, 'bg_far').setOrigin(0).setDepth(-11);
+    const mid = this.add.tileSprite(0, 0, W, GROUND_Y - 30, 'bg_mid').setOrigin(0).setDepth(-10);
+    const ground = this.add.tileSprite(0, GROUND_Y - 30, W, H - GROUND_Y + 30, 'bg_ground').setOrigin(0).setDepth(-10);
+    this.scrollLayers.push({ obj: far, speed: 25 }, { obj: mid, speed: 60 }, { obj: ground, speed: 150 });
   }
 
   // ---------------- 유닛 만들기
@@ -323,7 +347,7 @@ class BattleScene extends Phaser.Scene {
       if (helper === u) {
         const dx = d.x - u.x;
         if (u.jump) return;
-        if (Math.abs(dx) > 30) { if (!this.tryJump(u, d.x, true)) this.moveToward(u, d.x, speedMul, dt); return; }
+        if (Math.abs(dx) > 30) { this.moveToward(u, d.x, speedMul, dt); return; }
         d.reviveProg += dt;
         if (d.reviveProg >= RULES.reviveTime) this.revive(d, u);
         return;
@@ -349,15 +373,21 @@ class BattleScene extends Phaser.Scene {
     const L = this.leashOf(u);
     let want = dist > range * u.rangeFactor ? target.x : u.x;
     want = Phaser.Math.Clamp(want, this.anchorX - L, this.anchorX + L);
+    u.escapeCd = (u.escapeCd || 0) - dt;
     if (!u.jump) {
-      if (Math.abs(want - u.x) > 70) {
-        if (!this.tryJump(u, want, true)) this.moveToward(u, want, speedMul, dt);
-      } else if (Math.abs(want - u.x) > 8) {
-        this.moveToward(u, want, speedMul, dt);
-      } else if (dist <= range) {
-        // 싸우는 중에도 가만히 있지 않고 짧게 점프하며 자리를 바꿈 (공중에선 잘 안 맞음)
-        const hop = Phaser.Math.Clamp(u.x + (Math.random() - 0.5) * 300, this.anchorX - L, this.anchorX + L);
-        if (Math.abs(hop - u.x) > 60) this.tryJump(u, hop, false);
+      const close = this.nearest(u, enemies);
+      if (u.hp < u.hpMax * 0.3 && u.escapeCd <= 0 && Math.abs(close.x - u.x) < 130) {
+        // 체력이 바닥인데 적이 붙어 있으면 반대쪽으로 불릿 점프해서 도망
+        u.escapeCd = 5; u.jumpCd = 0;
+        this.tryJump(u, u.x - (Math.sign(close.x - u.x) || 1) * 320, true);
+      } else if (Math.abs(want - u.x) > 70) {
+        // 적에게 다가갈 때 20% 확률로 불릿 점프 (다가가기 시작할 때 한 번만 정함)
+        if (u.approachJump === undefined) u.approachJump = Math.random() < RULES.approachJumpChance;
+        if (!(u.approachJump && this.tryJump(u, want, true))) this.moveToward(u, want, speedMul, dt);
+        else u.approachJump = false;
+      } else {
+        u.approachJump = undefined;
+        if (Math.abs(want - u.x) > 8) this.moveToward(u, want, speedMul, dt);
       }
     }
     if (dist <= range) {
@@ -581,6 +611,8 @@ class BattleScene extends Phaser.Scene {
     if (this.ended) return;
     const dt = Math.min(delta / 1000, 0.05) * this.timeMul;
     this.elapsed += dt;
+
+    this.scrollLayers.forEach(l => { l.obj.tilePositionX += l.speed * dt; });
 
     if (this.sayTimer > 0) { this.sayTimer -= dt; if (this.sayTimer <= 0) this.tweens.add({ targets: this.sayBox, alpha: 0, duration: 400 }); }
 

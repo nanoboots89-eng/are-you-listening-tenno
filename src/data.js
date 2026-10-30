@@ -69,6 +69,7 @@ const RULES = {
   reviveTime: 3,          // 부활에 걸리는 시간(초)
   reviveHpRatio: 0.4,     // 부활 시 체력 비율
   lotusPoints: 3,         // 로터스 개입 횟수
+  approachJumpChance: 0.2, // 적에게 다가갈 때 불릿 점프를 쓸 확률
 };
 
 // 원작 방어력 공식: 피해 감소 = 방어력 / (방어력 + 300)
